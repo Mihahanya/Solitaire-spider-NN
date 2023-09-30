@@ -27,9 +27,12 @@ pygame.display.set_caption('Solitaire Spider')
 game = Game()
 
 
-def display_table(game):
+def display_table(game, step):
     txtsurf = font.render('Possible to unclose: ' + str(len(game.closed)), True, (0, 0, 0))
     window.blit(txtsurf, (5, 5))
+
+    txtsurf = font.render('Game step: ' + str(step), True, (0, 0, 0))
+    window.blit(txtsurf, (200, 5))
 
     for i, stack in enumerate(game.stacks):
         x = STACK_X_OFFSET + i * (CARD_WIDTH + CARD_SPACING)
@@ -58,23 +61,6 @@ def desk_repr(game):
     return res
 
 
-"""while True:
-    game.print()
-
-    unc = input('Unclose: ')
-    if unc.lower() == 'yes':
-        status = game.unclose_one()
-    else:
-        fr = int(input('from: '))
-        to = int(input('to: '))
-        n = int(input('n: '))
-        status = game.make_move(fr, to, n)
-
-    print('take rows ', game.check_rows())
-
-    print(status)"""
-
-
 class MyModel(tf.keras.Model):
     def __init__(self, inp_shape, dense_units, rnn_units1, outp_len):
         super().__init__(self)
@@ -101,32 +87,6 @@ class MyModel(tf.keras.Model):
 
         return x
 
-    #@tf.function
-    def train(self, states, rewards, actions):
-        disc_rewards = discount_rewards(rewards)
-
-        for state, reward, action in zip(states, disc_rewards, actions):
-            with tf.GradientTape() as tape:
-                p = self(np.array([state]), training=True)[0]
-                loss = self.loss(p, action) * reward
-
-            grads = tape.gradient(loss, self.trainable_variables)
-            self.optimizer.apply_gradients(zip(grads, self.trainable_variables))
-
-    """@tf.function
-    def train_step(self, inputs):
-        inputs, labels = inputs
-
-        with tf.GradientTape() as tape:
-            predictions = self(inputs, training=True)
-            loss = self.loss(labels, predictions)
-
-        grads = tape.gradient(loss, self.trainable_variables)
-        self.optimizer.apply_gradients(zip(grads, self.trainable_variables))
-
-        self.reset_states()
-
-        return {'loss': loss}"""
 
 def rand_ind(lgts, temperature=1.0):
     lgts = lgts / temperature
@@ -146,7 +106,7 @@ def discount_rewards(rewards):
 
 EPISODE_SIZE = 10
 MAX_STEPS = 100
-SAVE_PER = 5
+SAVE_PER = 15
 
 desk_emb_len = CARD_EMB_LEN * 10 * (len(RANKS) + 1)
 
@@ -174,9 +134,7 @@ stacks_collected = 0
 wined = 0
 start_epoch_time = time.time()
 
-rewards, states, actions, losses = [], [], [], []
-
-tape = tf.GradientTape(persistent=True)
+rewards, states, actions = [], [], []
 
 running = True
 while running:
@@ -190,7 +148,7 @@ while running:
     desk_state = desk_repr(game)
     states.append(desk_state)
 
-    move_pred = model(inputs=np.array([desk_state]), training=True)[0]
+    move_pred = model(inputs=np.array([desk_state]))[0]
 
     action = np.zeros_like(move_pred)
 
@@ -209,7 +167,7 @@ while running:
             to = rand_ind(to_out)
             n_take = rand_ind(n_take_out)
 
-            if game.is_can_move(frm, to, n_take) or ti > 10: break
+            if game.is_can_move(frm, to, n_take) or ti > 5: break
             ti += 1
 
         status = game.make_move(frm, to, n_take)
@@ -228,6 +186,7 @@ while running:
     rew = 0.0001
     #if status == 'ok move': rew += 0.5
     if status == 'same suit move': rew += 0.1
+    if stacks_collected == 8: rew += 3
     rew += st_collected * 1
     rewards.append(rew)
 
@@ -238,22 +197,25 @@ while running:
             print(f'WIN!!! vvv with {game_step} steps')
             wined += 1
 
-        #model.train(states, rewards, actions)
         rewards = discount_rewards(rewards)
-        for loss, reward in zip(losses, rewards):
-            l = loss * reward
-            grads = tape.gradient(l, self.trainable_variables)
-            self.optimizer.apply_gradients(zip(grads, self.trainable_variables))
+        with tf.GradientTape() as tape:
+            logits = model(np.array(states))
+            #logits *= np.array(actions)
+            #loss = model.loss(logits*np.array(actions), np.array(actions)) * rewards
+            loss = tf.reduce_sum(tf.reduce_mean(tf.square(np.array(actions) - logits), axis=-1) * rewards)
+            print(loss)
+
+        gradients = tape.gradient(loss, model.trainable_variables)
+        model.optimizer.apply_gradients(zip(gradients, model.trainable_variables))
 
         print(f'i: {i}, rew: {sum(rewards)}, step: {game_step}, gamed: {gamed}, stks: {stacks_collected}, duration: {round(time.time()-start_epoch_time, 2)} s')
 
-        rewards, states, actions, losses = [], [], [], []
+        rewards, states, actions = [], [], []
         game = Game()
         stacks_collected = 0
         gamed += 1
         game_step = 0
         start_epoch_time = time.time()
-        tape = tf.GradientTape(persistent=True)
 
         if gamed % SAVE_PER == 0:
             model.save('SSP01')
@@ -265,7 +227,7 @@ while running:
     i += 1
 
     window.fill((230, 230, 230))
-    display_table(game)
+    display_table(game, game_step)
 
     pygame.display.flip()
 
