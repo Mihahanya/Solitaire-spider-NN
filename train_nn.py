@@ -6,6 +6,8 @@ import tensorflow as tf
 import time
 import os
 
+tf.random.set_seed(80085)
+
 os.environ['TF_CPP_MIN_LOG_LEVEL'] = '3'
 print("Num GPUs Available: ", len(tf.config.list_physical_devices('GPU')))
 
@@ -16,7 +18,7 @@ CARD_WIDTH = 40
 CARD_HEIGHT = 60
 CARD_SPACING = 20
 STACK_X_OFFSET = 10
-STACK_Y_OFFSET = 10
+STACK_Y_OFFSET = 30
 
 pygame.init()
 window = pygame.display.set_mode((WINDOW_WIDTH, WINDOW_HEIGHT))
@@ -26,6 +28,9 @@ game = Game()
 
 
 def display_table(game):
+    txtsurf = font.render('Possible to unclose: ' + str(len(game.closed)), True, (0, 0, 0))
+    window.blit(txtsurf, (5, 5))
+
     for i, stack in enumerate(game.stacks):
         x = STACK_X_OFFSET + i * (CARD_WIDTH + CARD_SPACING)
         for j, card in enumerate(stack.stack):
@@ -48,6 +53,7 @@ def desk_repr(game):
     for i, stack in enumerate(game.stacks):
         for j, card in enumerate(reversed(stack.stack)):
             res[i, j, :] = card.repr()
+            if j+1 >= 14: break
 
     return res
 
@@ -73,12 +79,12 @@ class MyModel(tf.keras.Model):
     def __init__(self, inp_shape, dense_units, rnn_units1, outp_len):
         super().__init__(self)
         self.conv = tf.keras.layers.Conv2D(8, 3, strides=1, padding='same', activation='linear')
-        self.gru1 = tf.keras.layers.GRU(rnn_units1,
+        """self.gru1 = tf.keras.layers.GRU(rnn_units1,
                                         return_sequences=True,
                                         return_state=True,
                                         recurrent_initializer='glorot_uniform',
                                         stateful=True,
-                                        name='gru_1')
+                                        name='gru_1')"""
         self.flatten = tf.keras.layers.Flatten(name='flatt')
         self.dense_inp = tf.keras.layers.Dense(dense_units, input_dim=inp_shape, name='input_dense', activation='linear')
         self.dense = tf.keras.layers.Dense(outp_len, name='output_dense', activation='linear')
@@ -87,7 +93,7 @@ class MyModel(tf.keras.Model):
         x = inputs
         x = self.conv(x, training=training)
         x = self.flatten(x)
-        x, state1 = self.gru1(x, training=training)
+        #x, state1 = self.gru1(x, training=training)
 
         x = self.dense_inp(x, training=training)
 
@@ -95,19 +101,9 @@ class MyModel(tf.keras.Model):
 
         return x
 
-    def discount_rewards(self, rewards):
-        res = []
-        rewards.reverse()
-        sum_reward = 0
-        for r in rewards:
-            sum_reward = r + 0.98 * sum_reward
-            res.append(sum_reward)
-        res.reverse()
-        return res
-
     #@tf.function
     def train(self, states, rewards, actions):
-        disc_rewards = self.discount_rewards(rewards)
+        disc_rewards = discount_rewards(rewards)
 
         for state, reward, action in zip(states, disc_rewards, actions):
             with tf.GradientTape() as tape:
@@ -132,9 +128,25 @@ class MyModel(tf.keras.Model):
 
         return {'loss': loss}"""
 
+def rand_ind(lgts, temperature=1.0):
+    lgts = lgts / temperature
+    ids = tf.random.categorical(tf.math.log([lgts]), num_samples=1)
+    return ids[0, 0].numpy()
+
+def discount_rewards(rewards):
+    res = []
+    rewards.reverse()
+    sum_reward = 0
+    for r in rewards:
+        sum_reward = r + 0.98 * sum_reward
+        res.append(sum_reward)
+    res.reverse()
+    return res
+
 
 EPISODE_SIZE = 10
 MAX_STEPS = 100
+SAVE_PER = 5
 
 desk_emb_len = CARD_EMB_LEN * 10 * (len(RANKS) + 1)
 
@@ -160,9 +172,11 @@ game_step = 0
 gamed = 0
 stacks_collected = 0
 wined = 0
+start_epoch_time = time.time()
 
-rewards, states, actions = [], [], []
+rewards, states, actions, losses = [], [], [], []
 
+tape = tf.GradientTape(persistent=True)
 
 running = True
 while running:
@@ -170,90 +184,80 @@ while running:
         if event.type == pygame.QUIT:
             running = False
         font = pygame.font.SysFont("Arial", 16)
-    #
+
+    # Move
 
     desk_state = desk_repr(game)
-    move = model(inputs=np.array([desk_state]), training=False)[0]
-
-    frm = np.argmax(move[:10])
-    to = np.argmax(move[10:20])
-    n_take = np.argmax(move[20:-1])
-    is_open_closed = move[-1] > 0.5
-    #print(frm, to, n_take)
-
     states.append(desk_state)
 
-    action = np.zeros_like(move)
-    action[-1] = int(is_open_closed)
-    if not is_open_closed:
+    move_pred = model(inputs=np.array([desk_state]), training=True)[0]
+
+    action = np.zeros_like(move_pred)
+
+    frm_out = move_pred[:10]
+    to_out = move_pred[10:20]
+    n_take_out = move_pred[20:-1]
+    is_open_closed_out = move_pred[-1]
+
+    if np.random.rand() < is_open_closed_out:
+        action[-1] = 1.0
+        status = game.unclose_one()
+    else:
+        ti = 0
+        while True:
+            frm = rand_ind(frm_out)
+            to = rand_ind(to_out)
+            n_take = rand_ind(n_take_out)
+
+            if game.is_can_move(frm, to, n_take) or ti > 10: break
+            ti += 1
+
+        status = game.make_move(frm, to, n_take)
+
         action[frm] = 1
         action[10 + to] = 1
         action[20 + n_take] = 1
+
     actions.append(action)
 
-    if not is_open_closed:
-        status = game.make_move(frm, to, n_take)
-    else:
-        print('ooooooooooooo')
-        status = game.unclose_one()
+    # Calculating reward
 
     st_collected = game.check_rows()
     stacks_collected += st_collected
 
-    rew = 0
-    if status == 'ok move': rew += 0.5
-    if status == 'same suit move': rew += 1
-    if stacks_collected == 10: rew += 10
-    rew += st_collected * 2
+    rew = 0.0001
+    #if status == 'ok move': rew += 0.5
+    if status == 'same suit move': rew += 0.1
+    rew += st_collected * 1
     rewards.append(rew)
 
-    if stacks_collected == 10:
-        print(f'WIN!!! with {game_step} steps')
+    # Training
 
-        model.train(states, rewards, actions)
+    if game_step >= MAX_STEPS or stacks_collected == 8:
+        if stacks_collected == 8:
+            print(f'WIN!!! vvv with {game_step} steps')
+            wined += 1
 
-        game = Game()
-        stacks_collected = 0
-        gamed += 1
-        wined += 1
-        game_step = 0
+        #model.train(states, rewards, actions)
+        rewards = discount_rewards(rewards)
+        for loss, reward in zip(losses, rewards):
+            l = loss * reward
+            grads = tape.gradient(l, self.trainable_variables)
+            self.optimizer.apply_gradients(zip(grads, self.trainable_variables))
 
-    if rew == 0 and i < 10000:
-        taked = 0
-        for ii, st_from in enumerate(game.stacks):
-            for jj, st_to in enumerate(game.stacks):
-                if ii == jj: continue
+        print(f'i: {i}, rew: {sum(rewards)}, step: {game_step}, gamed: {gamed}, stks: {stacks_collected}, duration: {round(time.time()-start_epoch_time, 2)} s')
 
-                if st_to.stack and st_from.stack and st_to.stack[-1].rank - st_from.stack[-1].rank == 1:
-                    rew = 0.5
-                    if st_to.stack[-1].suit == st_from.stack[-1].suit: rew = 1
-
-                    action = np.zeros_like(move)
-                    action[ii] = 1
-                    action[10 + jj] = 1
-                    action[20 + 1] = 1
-
-                    model.train([states[-1]], [rew], [action])
-
-                    taked += 1
-        if taked <= 1:
-            action = np.zeros_like(move)
-            action[-1] = 1
-            model.train([states[-1]], [1.], [action])
-
-    if i % EPISODE_SIZE == 0:
-        if sum(rewards) != 0:
-            model.train(states, rewards, actions)
-            print(f'i: {i}, rew: {sum(rewards)}')
-
-        rewards, states, actions = [], [], []
-
-    if game_step >= MAX_STEPS:
-        print('regamed')
+        rewards, states, actions, losses = [], [], [], []
         game = Game()
         stacks_collected = 0
         gamed += 1
         game_step = 0
+        start_epoch_time = time.time()
+        tape = tf.GradientTape(persistent=True)
+
+        if gamed % SAVE_PER == 0:
+            model.save('SSP01')
+            print('model saved')
 
     #
 

@@ -32,7 +32,7 @@ class Stack:
         self.can_take_n = 1
 
     def can_add(self, st):
-        return self.stack[-1].rank - st[0].rank == 1
+        return not self.stack or self.stack[-1].rank - st[0].rank == 1
 
     def add(self, st):
         self.stack += st
@@ -43,7 +43,7 @@ class Stack:
             self.can_take_n = len(st)
 
     def can_take(self, n):
-        return n <= self.can_take_n
+        return 1 <= n <= self.can_take_n
 
     def check_row(self):
         if self.can_take_n == len(RANKS) and self.stack[-self.can_take_n].rank == len(RANKS)-1 and self.stack[-1].rank == 0:
@@ -90,19 +90,23 @@ class Game:
             card.hidden = i < len(cards)-10
             self.stacks[i % 10].stack.append(card)
 
-    def make_move(self, frm, to, n_take):
+    def is_can_move(self, frm, to, n_take):
         if self.stacks[frm].can_take(n_take):
             taken = self.stacks[frm].take(n_take, take=False)
-
             if self.stacks[to].can_add(taken):
-                _ = self.stacks[frm].take(n_take, take=True)
-                status = 'ok move'
+                return True
+        return False
 
-                if taken[0].suit == self.stacks[to].stack[-1].suit: status = 'same suit move'
+    def make_move(self, frm, to, n_take):
+        if self.is_can_move(frm, to, n_take):
+            taken = self.stacks[frm].take(n_take, take=True)
+            status = 'ok move'
+            if self.stacks[to].stack and taken[0].suit == self.stacks[to].stack[-1].suit:
+                status = 'same suit move'
 
-                self.stacks[to].add(taken)
+            self.stacks[to].add(taken)
 
-                return status
+            return status
         return 'wrong move'
 
     def unclose_one(self):
